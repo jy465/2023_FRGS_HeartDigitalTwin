@@ -8,7 +8,8 @@ class Conv2DBlock(nn.Module):
 
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
-        self.block = nn.Sequential(
+        # Keep legacy submodule name `conv2D` so old checkpoints load directly.
+        self.conv2D = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False),
             nn.GroupNorm(num_groups=16, num_channels=out_channels),
             nn.LeakyReLU(negative_slope=0.01, inplace=True),
@@ -18,7 +19,7 @@ class Conv2DBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.block(x)
+        return self.conv2D(x)
 
 
 class DecoderBlock(nn.Module):
@@ -43,8 +44,16 @@ class UNet2D(nn.Module):
     Output shape: [B, num_classes, H, W]
     """
 
-    def __init__(self, in_channels: int = 1, num_classes: int = 4, pretrained_encoder: bool = True):
+    def __init__(self, in_ch: int = 1, out_ch: int = 4, pretrained: bool = True, **kwargs):
         super().__init__()
+
+        # Backward compatibility for newer call-sites.
+        in_channels = kwargs.pop("in_channels", in_ch)
+        num_classes = kwargs.pop("num_classes", out_ch)
+        pretrained_encoder = kwargs.pop("pretrained_encoder", pretrained)
+        if kwargs:
+            unknown = ", ".join(sorted(kwargs.keys()))
+            raise TypeError(f"Unexpected keyword argument(s): {unknown}")
 
         # timm returns intermediate feature maps from shallow to deep.
         self.encoder = timm.create_model(
@@ -59,10 +68,11 @@ class UNet2D(nn.Module):
         self.decoder3 = DecoderBlock(encoder_channels[2], encoder_channels[1], encoder_channels[1])
         self.decoder2 = DecoderBlock(encoder_channels[1], encoder_channels[0], encoder_channels[0])
 
-        self.up_final_1 = nn.ConvTranspose2d(encoder_channels[0], 96, kernel_size=2, stride=2)
-        self.conv_final_1 = Conv2DBlock(96, 64)
-        self.up_final_2 = nn.ConvTranspose2d(64, 24, kernel_size=2, stride=2)
-        self.head = nn.Conv2d(24, num_classes, kernel_size=1)
+        # Keep legacy module names so state_dict keys match model-2.py.
+        self.UpSample2D_1 = nn.ConvTranspose2d(encoder_channels[0], 96, kernel_size=2, stride=2)
+        self.Conv2D_1 = Conv2DBlock(96, 64)
+        self.UpSample2D_2 = nn.ConvTranspose2d(64, 24, kernel_size=2, stride=2)
+        self.Conv2D_final = nn.Conv2d(24, num_classes, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # timm mambaout returns NHWC feature maps, so convert them into NCHW.
@@ -74,8 +84,8 @@ class UNet2D(nn.Module):
         d2 = self.decoder3(d1, e2)
         d3 = self.decoder2(d2, e1)
 
-        x = self.up_final_1(d3)
-        x = self.conv_final_1(x)
-        x = self.up_final_2(x)
+        x = self.UpSample2D_1(d3)
+        x = self.Conv2D_1(x)
+        x = self.UpSample2D_2(x)
 
-        return self.head(x)
+        return self.Conv2D_final(x)
